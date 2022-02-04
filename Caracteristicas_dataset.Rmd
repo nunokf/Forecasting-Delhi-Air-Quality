@@ -1,0 +1,366 @@
+---
+title: "Forecasting Delhi Air Quality"
+author: "Nuno Fernandes"
+date: "02/02/2021"
+output: 
+  html_document:
+    keep_md: yes
+    code_folding: hide
+---
+
+# EDA & Preprocessing
+
+### Import Libraries
+```{r, echo=FALSE,warning=FALSE, message=FALSE, results=FALSE}
+packages <- c("astsa","fpp2","forecast","xts","TSstudio","ggplot2", "tseries", "MTS", "keras", "tensorflow", "zoo", "urca", "FinTS", "smooth", "reticulate")
+
+installed_packages <- packages %in% row.names(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed.packages])
+}
+
+lapply(packages, library, character.only = TRUE)
+```
+
+### Read csv
+```{r, echo=FALSE}
+df <- read.csv("city_day.csv")
+```
+
+### Head df
+```{r,echo=FALSE}
+head(df)
+```
+
+### subset
+```{r,echo=FALSE}
+df <- subset(df, City == "Delhi")
+```
+
+
+```{r,echo=FALSE}
+df$Date <- as.Date(df$Date)
+```
+
+pode ser bom para a introdução:
+doi: 10.4103/0970-0218.106617
+
+### Plot AQI (daily observations for a 6 yer period)
+```{r,echo=FALSE}
+ggplot(df, aes(x = Date, y = AQI)) + geom_line() + labs(x = "Year", y= "Air Quality Index (AQI)") + scale_y_continuous(expand = c(0, 0), breaks = c(0,100,200,300,400,500,600,700)) + coord_cartesian(ylim=c(0, 750)) + ggtitle("Air Quality in Delhi") + theme(plot.title = element_text(hjust = 0.5))
+```
+### Convert to a TS object
+```{r,echo=FALSE}
+ts <- ts(df$AQI, start=2015, frequency=365.25)
+#interpolation of na
+ts <- na.interp(ts)
+```
+
+### Inspect Trend & Seasonality
+```{r, echo=F}
+df1 <- tsclean(ts)
+plot(decompose(df1))
+```
+
+
+### xts object to convert to monthly (to check for seasonality)
+```{r,echo=FALSE, warning=FALSE}
+ts_2 <- xts(x = df$PM2.5, order.by = df$Date)
+
+#convert xts duration to ts weekly time series
+ts_monthly <- to.monthly(ts_2)
+ts_monthly <- xts_to_ts(ts_monthly)
+```
+
+### Seasonal Plot
+```{r,echo=FALSE}
+ggseasonplot(ts_monthly, year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("Qualidade do ar em Delhi (AQI)") +
+  ggtitle("Qualidade do Ar em Delhi: Sazonalidade") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Seasonal Plot
+```{r,echo=FALSE}
+ggseasonplot(ts_monthly, polar=TRUE) +
+  ylab("Air Quality Index (AQI)") +
+  ggtitle("Seasonal plot: Air Quality in Delhi") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Seasonal Plot
+```{r,echo=FALSE}
+ggmonthplot(ts_monthly)+ylab("Air Quality Index (AQI)") +
+  ggtitle("Seasonal plot: Air Quality in Delhi")+
+theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+### Lag Plot
+```{r,echo=FALSE}
+gglagplot(ts_monthly)
+
+```
+
+### Convert to weekly time series
+```{r,echo=FALSE, warning=FALSE}
+#convert xts duration to ts weekly time series
+ts_weekly <- to.weekly(ts_2)
+ts_weekly <- xts_to_ts(ts_weekly)
+```
+
+### Seasonal Plot: weekly
+```{r,echo=FALSE}
+ggseasonplot(ts_weekly, polar=TRUE) +
+ylab("Air Quality Index (AQI)") +
+  ggtitle("Seasonal plot: Air Quality in Delhi")+
+theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+### Train test split
+```{r, echo = FALSE}
+ts <- na.interp(ts)
+train <- subset(ts, end=length(ts)-366)
+test <- subset(ts, start=length(ts)-365)
+autoplot(train) + autolayer(test)
+```
+
+### stationarity-test
+```{r, echo = FALSE}
+adf.test(train)
+
+kpss.test(train, null = "Trend")
+```
+
+
+### Box-Cox
+```{r, echo=FALSE}
+lambda = BoxCox.lambda(train)
+print(lambda)
+ts_box = BoxCox(train, lambda = lambda)
+plot.ts(ts_box)
+```
+
+### check constant variance arch-test 
+```{r}
+archTest(ts_box, lag=10)
+```
+
+### check n diffs
+```{r}
+ndiffs(ts_box)
+nsdiffs(ts_box)
+
+# decide if one or two diff 365
+ts_diff = (diff(diff(ts_box,365)))
+plot(ts_diff)
+acf(ts_diff, lag = 365)
+```
+
+### stationarity-test
+```{r, echo = FALSE}
+adf.test(ts_diff)
+
+kpss.test(ts_diff, null = "Trend")
+```
+
+### ACF & PACF
+```{r, echo = FALSE}
+acf(ts_diff, lag = 365)
+
+pacf(ts_diff, lag = 365)
+```
+
+
+### Auto - Arima 
+```{r, echo = FALSE}
+arima <- auto.arima(train)
+arima
+```
+
+```{r}
+Box.test(resid(arima),type="Ljung",lag=20,fitdf=3) #fitdiff (p+q)
+```
+
+```{r, echo = FALSE}
+checkresiduals(arima)
+```
+
+```{r, echo=FALSE}
+qqnorm(arima$residuals); qqline(arima$residuals) 
+
+```
+
+# ARIMA (8,1,1) (after having removed non-sig coeffs)
+```{r}
+arima2 <- Arima(train, order = c(1,1,2))
+arima2
+```
+
+
+### Dynamic Harmonic regression
+```{r}
+dynamic <- list(aicc=Inf)
+for(K in seq(5)) {
+  fit <- auto.arima(train, xreg=fourier(train, K=K),
+    seasonal=FALSE)
+  if(fit[["aicc"]] < dynamic[["aicc"]]) {
+    dynamic <- fit
+    bestK <- K
+  }
+}
+
+dynamic
+```
+### ets
+```{r}
+stlf_fit = stlf(train, level = 95, method = "arima")
+#stlf_fit
+```
+
+### Compare AIC
+```{r}
+barplot(c(auto_ARIMA = arima$aic, arima2 = arima2$aic, dynamic_Harmonic_reg = dynamic$aic),
+        col = "light blue",
+        ylab = "AIC")
+```
+### metrics of different models
+
+### FORECAST
+
+### Forecast
+```{r}
+#arima2 %>%
+  #forecast(train, h=365, level = 95) %>%
+  #autoplot() + autolayer(test)
+```
+
+# EXPONENTIAL SMOOTHING MODELS
+```{r}
+ts %>%
+  stl(t.window=365, s.window=365) %>%
+  autoplot() 
+```
+
+```{r}
+#ETS = c('ANN','ANA','ANM', 'AAN','AAA', 'AAM', 'AAdN','AAdA', 'AAdM')
+
+#AIC <- c()
+#BIC <- c()
+#AICc <- c()
+#for (i in 1:9){
+#    b<-es(ts,model=t[i])
+#    AIC[i] <- AIC(b)
+#    BIC[i] <- BIC(b)
+#    AICc[i] <- AICc(b)
+#}
+
+e2_final <- es(ts,model='MNA',holdout=TRUE,silent=FALSE,interval=TRUE,h=365,level=0.95)
+```
+
+## Python - LSTM
+### multiprocessing
+```{r, warning=FALSE, message=FALSE}
+sys <- import("sys")
+exe <- file.path(sys$exec_prefix, "pythonw.exe")
+sys$executable <- exe
+sys$`_base_executable` <- exe
+multiprocessing <- import("multiprocessing")
+multiprocessing$set_executable(exe)
+```
+
+```{python}
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+from tensorflow.python.client import device_lib
+```
+
+```{python}
+# https://machinelearningmastery.com/how-to-develop-lstm-models-for-time-series-forecasting/
+
+import numpy
+import matplotlib.pyplot as plt
+from pandas import read_csv
+import math
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+# convert an array of values into a dataset matrix
+def create_dataset(dataset, look_back=1):
+	dataX, dataY = [], []
+	for i in range(len(dataset)-look_back-1):
+		a = dataset[i:(i+look_back), 0]
+		dataX.append(a)
+		dataY.append(dataset[i + look_back, 0])
+	return numpy.array(dataX), numpy.array(dataY)
+# fix random seed for reproducibility
+numpy.random.seed(7)
+# load the dataset
+dataframe = read_csv(r"C:\Users\nunok\Documents\Msc Data Science\time series\project\delhi_air_quality\city_day.csv", engine='python')
+dataframe = dataframe[dataframe["City"] == "Delhi"]
+dataframe = dataframe[["AQI"]]
+#dataframe.astype(int)
+dataframe = dataframe.dropna()
+#dataframe = read_csv(r"C:\Users\nunok\Documents\Msc Data Science\time series\project\dataset.csv", usecols=[1], engine='python')
+dataset = dataframe.values
+dataset = dataset.astype('float32')
+# normalize the dataset
+scaler = MinMaxScaler(feature_range=(0, 1))
+dataset = scaler.fit_transform(dataset)
+# split into train and test sets
+train_size = int(len(dataset) * 0.82)
+test_size = len(dataset) - train_size
+train, test = dataset[0:train_size,:], dataset[train_size:len(dataset),:]
+# reshape into X=t and Y=t+1
+look_back = 1
+trainX, trainY = create_dataset(train, look_back)
+testX, testY = create_dataset(test, look_back)
+# reshape input to be [samples, time steps, features]
+trainX = numpy.reshape(trainX, (trainX.shape[0], 1, trainX.shape[1]))
+testX = numpy.reshape(testX, (testX.shape[0], 1, testX.shape[1]))
+# create and fit the LSTM network
+model = Sequential()
+model.add(LSTM(4, input_shape=(1, look_back)))
+model.add(Dense(1))
+model.compile(loss='mean_squared_error', optimizer='adam')
+model.fit(trainX, trainY, epochs=50, batch_size=1, verbose=2)
+# make predictions
+trainPredict = model.predict(trainX)
+testPredict = model.predict(testX)
+# invert predictions
+trainPredict = scaler.inverse_transform(trainPredict)
+trainY = scaler.inverse_transform([trainY])
+testPredict = scaler.inverse_transform(testPredict)
+testY = scaler.inverse_transform([testY])
+# calculate root mean squared error
+trainScore = math.sqrt(mean_squared_error(trainY[0], trainPredict[:,0]))
+print('Train Score: %.2f RMSE' % (trainScore))
+testScore = math.sqrt(mean_squared_error(testY[0], testPredict[:,0]))
+print('Test Score: %.2f RMSE' % (testScore))
+# shift train predictions for plotting
+trainPredictPlot = numpy.empty_like(dataset)
+trainPredictPlot[:, :] = numpy.nan
+trainPredictPlot[look_back:len(trainPredict)+look_back, :] = trainPredict
+# shift test predictions for plotting
+testPredictPlot = numpy.empty_like(dataset)
+testPredictPlot[:, :] = numpy.nan
+testPredictPlot[len(trainPredict)+(look_back*2)+1:len(dataset)-1, :] = testPredict
+
+fig = plt.figure()
+ax = fig.add_axes([0.1,0.1,0.8,0.8])
+
+plt.plot(scaler.inverse_transform(dataset),label = "Observado")
+#plt.plot(trainPredictPlot)
+plt.plot(testPredictPlot, label = "Esperado")
+
+plt.legend(bbox_to_anchor =(0.3, 0.8), ncol = 1)
+
+ax.set_title('Previsão Qualidade do Ar em Delhi - LSTM')
+ax.set_ylabel('AQI')
+ax.set_xlabel('Ano')
+ax.set_xticks([0,365,730,1095,1460,1825])
+ax.set_xticklabels(["2015","2016","2017","2018","2019","2020"])
+
+plt.show()
+```
