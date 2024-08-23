@@ -4,4 +4,4 @@ Air quality in Delhi poses serious risks to the population. The Air Quality Inde
 
 SARIMA; LSTM; ETS
 
-![Optional Text](https://github.com/nunokf/Computer_VISION_POKA_Yoke/blob/main/images/4moments.png)
+![Optional Text](https://github.com/nunokf/Computer_VISION_POKA_Yoke/blob/main/figure-html/unnamed-chunk-36-1.png.png)
